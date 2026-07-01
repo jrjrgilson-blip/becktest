@@ -167,6 +167,29 @@ def backtest(df, p):
     return eq, tdf, realizado, entries, df, custo
 
 
+def niveis(preco, atr_pts, mm_atual, p):
+    """Calcula os niveis operacionais a partir do preco/ATR atuais e dos parametros."""
+    compras, levels = [], []
+    for i in range(p["max_ct"]):
+        c = round(preco - i * p["add_mult"] * atr_pts)
+        levels.append(c)
+        avg = round(sum(levels) / len(levels))
+        alvo = round(c + p["tp_mult"] * atr_pts)
+        dist_pts = round(preco - c)
+        compras.append({
+            "Contrato": i + 1,
+            "Comprar a": c,
+            "Alvo de venda": alvo,
+            "Preço médio": avg,
+            "Dist. do atual (pts)": dist_pts,
+            "R$ até aqui/ctr": round(dist_pts * p["ponto"], 2),
+        })
+    teto = round(mm_atual + p["ext_mult"] * atr_pts) if mm_atual else None
+    avg_max = sum(levels) / len(levels)
+    stop = round(avg_max - p["stop_pct"] * p["capital"] / (p["max_ct"] * p["ponto"]))
+    return pd.DataFrame(compras), teto, mm_atual, stop
+
+
 # ----------------------------- UI -----------------------------
 st.title("📉 Backtest WIN — Grade Adaptativa por Volatilidade")
 st.caption("Proxy padrão: ^BVSP. Para o WIN real, use Upload CSV.")
@@ -188,75 +211,112 @@ with st.sidebar:
         fim = st.date_input("Fim", date.today())
 
     st.header("Grade")
-    atr_len = st.number_input("ATR (períodos)", 5, 50, 14)
-    add_mult = st.slider("Adiciona a cada X × ATR de queda", 0.3, 3.0, 2.0, 0.1)
-    tp_mult = st.slider("Realiza a cada X × ATR de alta", 0.3, 3.0, 2.0, 0.1)
-    max_ct = st.slider("Máximo de contratos", 1, 8, 4)
+    atr_len = st.number_input("ATR (períodos)", 5, 50, 6)
+    add_mult = st.slider("Adiciona a cada X × ATR de queda", 0.3, 4.0, 2.4, 0.1)
+    tp_mult = st.slider("Realiza a cada X × ATR de alta", 0.3, 4.0, 3.0, 0.1)
+    max_ct = st.slider("Máximo de contratos", 1, 8, 2)
 
     st.header("Filtro de regime")
     usar_regime = st.checkbox("Ligar filtro de regime (média + inclinação)", True)
-    mm_len = st.number_input("Média de tendência (regime)", 10, 300, 72)
+    mm_len = st.number_input("Média de tendência (regime)", 10, 300, 21)
     acao = st.selectbox("Ao virar baixa", ["Manter", "Reduzir p/ 1", "Zerar tudo"], index=1)
     ext_guard = st.checkbox("Trava de esticada (não iniciar longe da média)", True)
-    ext_mult = st.slider("Distância máx. p/ iniciar (× ATR)", 0.5, 5.0, 2.0, 0.5)
+    ext_mult = st.slider("Distância máx. p/ iniciar (× ATR)", 0.5, 6.0, 4.0, 0.5)
 
     st.header("Custos e risco")
     custo = st.number_input("Custo por contrato/operação (R$)", 0.0, 20.0, 1.5, 0.5)
     ponto = st.number_input("R$ por ponto (WIN=0,20 / IND=1,00)", 0.05, 1.0, 0.20, 0.05)
     capital = st.number_input("Capital de referência (R$)", 1000, 500000, 20000, 1000)
-    stop_pct = st.slider("Stop de carteira (% do capital)", 0.05, 0.50, 0.15, 0.01)
+    stop_pct = st.slider("Stop de carteira (% do capital)", 0.05, 0.50, 0.10, 0.01)
 
     rodar = st.button("▶ Rodar backtest", type="primary", use_container_width=True)
 
-if rodar:
-    try:
-        fkey = "Automático" if fonte.startswith("Auto") else fonte
-        df, rotulo = obter_dados(fkey, ticker, periodo, arquivo)
-    except Exception as e:
-        st.error(f"Não consegui carregar dados reais.\n\n{e}\n\nUse **Upload CSV** ou tente depois.")
-        st.stop()
+tab1, tab2 = st.tabs(["📊 Backtest", "🎯 Níveis operacionais"])
 
-    dfi = preparar(df, atr_len, mm_len)          # indicadores no histórico INTEIRO
-    if usar_datas:                                # recorta só depois (média já aquecida)
-        dfi = dfi.loc[str(ini):str(fim)]
-        if len(dfi) < 5:
-            st.error("Janela de datas muito curta ou sem dados."); st.stop()
+with tab1:
+    if rodar:
+        try:
+            fkey = "Automático" if fonte.startswith("Auto") else fonte
+            df, rotulo = obter_dados(fkey, ticker, periodo, arquivo)
+        except Exception as e:
+            st.error(f"Não consegui carregar dados reais.\n\n{e}\n\nUse **Upload CSV** ou tente depois.")
+            st.stop()
 
-    if "SINTÉTICO" in rotulo:
-        st.warning("⚠️ Modo DEMONSTRAÇÃO — números NÃO são reais.")
+        dfi = preparar(df, atr_len, mm_len)          # indicadores no histórico INTEIRO
+        if usar_datas:                                # recorta só depois (média já aquecida)
+            dfi = dfi.loc[str(ini):str(fim)]
+            if len(dfi) < 5:
+                st.error("Janela de datas muito curta ou sem dados."); st.stop()
+
+        if "SINTÉTICO" in rotulo:
+            st.warning("⚠️ Modo DEMONSTRAÇÃO — números NÃO são reais.")
+        else:
+            st.success(f"Dados reais via **{rotulo}** — {len(dfi)} candles de "
+                       f"{dfi.index[0].date()} a {dfi.index[-1].date()}.")
+
+        p = dict(atr_len=atr_len, add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct,
+                 usar_regime=usar_regime, acao=acao, ext_guard=ext_guard, ext_mult=ext_mult,
+                 ponto=ponto, capital=capital, stop_pct=stop_pct, custo=custo)
+        eq, tdf, realizado, entries, dfr, custo_total = backtest(dfi, p)
+
+        n_entradas = int(tdf["Tipo"].isin(["COMPRA", "ADD"]).sum())
+        saidas = tdf[tdf["Tipo"].isin(["VENDA", "STOP", "SAIDA_REGIME", "REDUZ_REGIME"])]
+        n_stops = int((tdf["Tipo"] == "STOP").sum())
+        n_regime = int(tdf["Tipo"].isin(["SAIDA_REGIME", "REDUZ_REGIME"]).sum())
+        win = (saidas["Pontos"] > 0).mean() * 100 if len(saidas) else 0.0
+        mdd = (eq - eq.cummax()).min()
+        rd = (eq.iloc[-1] / abs(mdd)) if mdd < 0 else float("inf")
+        aberto_final = sum((dfr["Close"].iloc[-1] - e) for e in entries) * ponto
+
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Resultado líquido (m2m)", f"R$ {eq.iloc[-1]:,.0f}")
+        c2.metric("Drawdown máximo", f"R$ {mdd:,.0f}")
+        c3.metric("Retorno / Drawdown", f"{rd:.2f}")
+        c4.metric("Acerto nas saídas", f"{win:.0f}%")
+        c1.metric("Realizado (líq.)", f"R$ {realizado:,.0f}")
+        c2.metric("Custos totais", f"R$ {custo_total:,.0f}")
+        c3.metric("Entradas", n_entradas)
+        c4.metric("Stops / saídas de regime", f"{n_stops} / {n_regime}")
+
+        st.subheader("Curva de capital")
+        st.line_chart(eq)
+        st.subheader("Preço x Média de tendência")
+        st.line_chart(dfr[["Close", "MM"]])
+        with st.expander(f"Operações ({len(tdf)})"):
+            st.dataframe(tdf, use_container_width=True)
     else:
-        st.success(f"Dados reais via **{rotulo}** — {len(dfi)} candles de "
-                   f"{dfi.index[0].date()} a {dfi.index[-1].date()}.")
+        st.info("Configure na barra lateral e clique em **Rodar backtest**.")
 
-    p = dict(atr_len=atr_len, add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct,
-             usar_regime=usar_regime, acao=acao, ext_guard=ext_guard, ext_mult=ext_mult,
-             ponto=ponto, capital=capital, stop_pct=stop_pct, custo=custo)
-    eq, tdf, realizado, entries, dfr, custo_total = backtest(dfi, p)
+with tab2:
+    st.subheader("Plano operacional — níveis para colocar as ordens")
+    st.caption("Digite os valores atuais. O ATR é a chave do tempo gráfico: "
+               "use o ATR do diário, 60min, 15min etc. que você opera.")
+    tf = st.selectbox("Tempo gráfico (rótulo)", ["Diário", "60 min", "15 min", "5 min"], index=0)
+    d1, d2, d3 = st.columns(3)
+    preco_now = d1.number_input("Pontuação atual do índice", 1000.0, 500000.0, 172000.0, 100.0)
+    atr_now = d2.number_input(f"ATR atual ({tf}) em pontos", 10.0, 50000.0, 2500.0, 50.0)
+    mm_now = d3.number_input("Média de tendência atual (pts)", 0.0, 500000.0, 174000.0, 100.0)
 
-    n_entradas = int(tdf["Tipo"].isin(["COMPRA", "ADD"]).sum())
-    saidas = tdf[tdf["Tipo"].isin(["VENDA", "STOP", "SAIDA_REGIME", "REDUZ_REGIME"])]
-    n_stops = int((tdf["Tipo"] == "STOP").sum())
-    n_regime = int(tdf["Tipo"].isin(["SAIDA_REGIME", "REDUZ_REGIME"]).sum())
-    win = (saidas["Pontos"] > 0).mean() * 100 if len(saidas) else 0.0
-    mdd = (eq - eq.cummax()).min()
-    rd = (eq.iloc[-1] / abs(mdd)) if mdd < 0 else float("inf")
-    aberto_final = sum((dfr["Close"].iloc[-1] - e) for e in entries) * ponto
+    plv = dict(add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct, ext_mult=ext_mult,
+               ponto=ponto, capital=capital, stop_pct=stop_pct)
+    grade, teto, reducao, stop_lvl = niveis(preco_now, atr_now, mm_now, plv)
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Resultado líquido (m2m)", f"R$ {eq.iloc[-1]:,.0f}")
-    c2.metric("Drawdown máximo", f"R$ {mdd:,.0f}")
-    c3.metric("Retorno / Drawdown", f"{rd:.2f}")
-    c4.metric("Acerto nas saídas", f"{win:.0f}%")
-    c1.metric("Realizado (líq.)", f"R$ {realizado:,.0f}")
-    c2.metric("Custos totais", f"R$ {custo_total:,.0f}")
-    c3.metric("Entradas", n_entradas)
-    c4.metric("Stops / saídas de regime", f"{n_stops} / {n_regime}")
+    if teto and preco_now > teto:
+        st.error(f"⚠️ ESTICADO: {preco_now:,.0f} está acima do teto de {teto:,.0f} "
+                 f"(MM + {ext_mult:g}×ATR). A trava manda NÃO iniciar compra agora.")
+    else:
+        st.success(f"OK para iniciar: preço abaixo do teto de esticada ({teto:,.0f} pts).")
 
-    st.subheader("Curva de capital")
-    st.line_chart(eq)
-    st.subheader("Preço x Média de tendência")
-    st.line_chart(dfr[["Close", "MM"]])
-    with st.expander(f"Operações ({len(tdf)})"):
-        st.dataframe(tdf, use_container_width=True)
-else:
-    st.info("Configure na barra lateral e clique em **Rodar backtest**.")
+    st.markdown("**Grade de entradas e alvos** (compra na queda, vende na alta):")
+    st.dataframe(grade, use_container_width=True, hide_index=True)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Linha de redução (regime)", f"{reducao:,.0f} pts",
+              help="Se o preço perder essa linha com a média virando pra baixo: reduzir p/ 1 contrato.")
+    m2.metric(f"Stop de carteira ({max_ct} ctr)", f"{stop_lvl:,.0f} pts",
+              help=f"Onde a perda aberta atinge {stop_pct:.0%} do capital com a posição cheia.")
+    m3.metric("Teto de esticada", f"{teto:,.0f} pts" if teto else "—",
+              help="Acima disso, não iniciar posição nova.")
+
+    st.caption(f"Risco máx. teórico do plano ≈ do preço médio até o stop, com {max_ct} contratos. "
+               "Distâncias em R$ na tabela usam R$ {:.2f}/ponto.".format(ponto))
