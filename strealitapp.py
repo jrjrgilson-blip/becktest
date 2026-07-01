@@ -289,13 +289,35 @@ with tab1:
 
 with tab2:
     st.subheader("Plano operacional — níveis para colocar as ordens")
-    st.caption("Digite os valores atuais. O ATR é a chave do tempo gráfico: "
-               "use o ATR do diário, 60min, 15min etc. que você opera.")
+    st.caption("Puxe do último candle (diário) ou digite manualmente. O ATR é a chave do "
+               "tempo gráfico: para 60min/5min etc., digite o ATR daquele tempo.")
     tf = st.selectbox("Tempo gráfico (rótulo)", ["Diário", "60 min", "15 min", "5 min"], index=0)
+
+    for _k, _v in {"preco_in": 172000.0, "atr_in": 2500.0, "mm_in": 174000.0}.items():
+        st.session_state.setdefault(_k, _v)
+
+    if st.button("🔄 Puxar do último candle (auto)"):
+        try:
+            fk = "Automático" if fonte.startswith("Auto") else fonte
+            dfa, rot = obter_dados(fk, ticker, periodo, arquivo)
+            dfa = preparar(dfa, atr_len, mm_len).dropna()
+            ult = dfa.iloc[-1]
+            st.session_state.preco_in = float(round(ult["Close"]))
+            st.session_state.atr_in = float(round(ult["ATR"]))
+            st.session_state.mm_in = float(round(ult["MM"]))
+            st.success(f"Puxado via {rot} ({dfa.index[-1].date()}): preço "
+                       f"{st.session_state.preco_in:,.0f} · ATR {st.session_state.atr_in:,.0f} "
+                       f"· MM{mm_len} {st.session_state.mm_in:,.0f}")
+        except Exception as e:
+            st.warning(f"Não consegui puxar automático ({e}). Digite manualmente abaixo.")
+
     d1, d2, d3 = st.columns(3)
-    preco_now = d1.number_input("Pontuação atual do índice", 1000.0, 500000.0, 172000.0, 100.0)
-    atr_now = d2.number_input(f"ATR atual ({tf}) em pontos", 10.0, 50000.0, 2500.0, 50.0)
-    mm_now = d3.number_input("Média de tendência atual (pts)", 0.0, 500000.0, 174000.0, 100.0)
+    preco_now = d1.number_input("Pontuação atual do índice", 1000.0, 500000.0,
+                                step=100.0, key="preco_in")
+    atr_now = d2.number_input(f"ATR atual ({tf}) em pontos", 10.0, 50000.0,
+                              step=50.0, key="atr_in")
+    mm_now = d3.number_input("Média de tendência atual (pts)", 0.0, 500000.0,
+                             step=100.0, key="mm_in")
 
     plv = dict(add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct, ext_mult=ext_mult,
                ponto=ponto, capital=capital, stop_pct=stop_pct)
