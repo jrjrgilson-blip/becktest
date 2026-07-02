@@ -154,8 +154,12 @@ def backtest(df, p):
         if libera:
             if pos == 0:
                 esticado = p["ext_guard"] and not np.isnan(mm) and price > mm + p["ext_mult"] * a
-                if not esticado:
-                    entries.append(price); realizado -= cc; custo += cc
+                repique_ok = True
+                if p["modo_reentrada"] == "Repique na média":
+                    repique_ok = (not np.isnan(mm)) and price <= mm + p["reentrada_band"] * a
+                if not esticado and repique_ok:
+                    for _ in range(min(p["ct_inicial"], p["max_ct"])):
+                        entries.append(price); realizado -= cc; custo += cc
                     trades.append((dt, "COMPRA", price, 0.0))
             elif pos < p["max_ct"] and price <= entries[-1] - p["add_mult"] * a:
                 entries.append(price); realizado -= cc; custo += cc
@@ -170,26 +174,26 @@ def backtest(df, p):
 
 
 def niveis(preco, atr_pts, mm_atual, p):
-    """Calcula os niveis operacionais a partir do preco/ATR atuais e dos parametros."""
-    compras, levels = [], []
-    for i in range(p["max_ct"]):
+    """Níveis operacionais a partir do preço/ATR atuais e dos parâmetros."""
+    ct_ini = min(p.get("ct_inicial", 1), p["max_ct"])
+    linhas, precos = [], []
+    for _ in range(ct_ini):
+        precos.append(preco)
+    avg = round(sum(precos) / len(precos))
+    linhas.append({"Nível": "1ª entrada", "Comprar a": round(preco), "Ctr": ct_ini,
+                   "Posição": ct_ini, "Alvo de venda": round(preco + p["tp_mult"] * atr_pts),
+                   "Preço médio": avg})
+    for i in range(1, p["max_ct"] - ct_ini + 1):
         c = round(preco - i * p["add_mult"] * atr_pts)
-        levels.append(c)
-        avg = round(sum(levels) / len(levels))
-        alvo = round(c + p["tp_mult"] * atr_pts)
-        dist_pts = round(preco - c)
-        compras.append({
-            "Contrato": i + 1,
-            "Comprar a": c,
-            "Alvo de venda": alvo,
-            "Preço médio": avg,
-            "Dist. do atual (pts)": dist_pts,
-            "R$ até aqui/ctr": round(dist_pts * p["ponto"], 2),
-        })
+        precos.append(c)
+        avg = round(sum(precos) / len(precos))
+        linhas.append({"Nível": f"Adição {i}", "Comprar a": c, "Ctr": 1,
+                       "Posição": ct_ini + i, "Alvo de venda": round(c + p["tp_mult"] * atr_pts),
+                       "Preço médio": avg})
     teto = round(mm_atual + p["ext_mult"] * atr_pts) if mm_atual else None
-    avg_max = sum(levels) / len(levels)
+    avg_max = sum(precos) / len(precos)
     stop = round(avg_max - p["stop_pct"] * p["capital"] / (p["max_ct"] * p["ponto"]))
-    return pd.DataFrame(compras), teto, mm_atual, stop
+    return pd.DataFrame(linhas), teto, mm_atual, stop
 
 
 # ----------------------------- UI -----------------------------
@@ -217,6 +221,11 @@ with st.sidebar:
     add_mult = st.slider("Adiciona a cada X × ATR de queda", 0.3, 4.0, 2.4, 0.1)
     tp_mult = st.slider("Realiza a cada X × ATR de alta", 0.3, 4.0, 3.0, 0.1)
     max_ct = st.slider("Máximo de contratos", 1, 8, 2)
+    ct_inicial = st.number_input("Contratos na 1ª entrada", 1, max_ct, 1)
+
+    st.header("Reentrada")
+    modo_reentrada = st.selectbox("Modo de (re)entrada", ["Mercado", "Repique na média"], index=0)
+    reentrada_band = st.slider("Repique: distância máx. da média (× ATR)", 0.2, 3.0, 1.0, 0.1)
 
     st.header("Filtro de regime")
     usar_regime = st.checkbox("Ligar filtro de regime (média + inclinação)", True)
@@ -257,6 +266,7 @@ with tab1:
                        f"{dfi.index[0].date()} a {dfi.index[-1].date()}.")
 
         p = dict(atr_len=atr_len, add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct,
+                 ct_inicial=ct_inicial, modo_reentrada=modo_reentrada, reentrada_band=reentrada_band,
                  usar_regime=usar_regime, acao=acao, ext_guard=ext_guard, ext_mult=ext_mult,
                  ponto=ponto, capital=capital, stop_pct=stop_pct, custo=custo)
         eq, tdf, realizado, entries, dfr, custo_total = backtest(dfi, p)
@@ -321,8 +331,8 @@ with tab2:
     mm_now = d3.number_input("Média de tendência atual (pts)", 0.0, 500000.0,
                              step=100.0, key="mm_in")
 
-    plv = dict(add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct, ext_mult=ext_mult,
-               ponto=ponto, capital=capital, stop_pct=stop_pct)
+    plv = dict(add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct, ct_inicial=ct_inicial,
+               ext_mult=ext_mult, ponto=ponto, capital=capital, stop_pct=stop_pct)
     grade, teto, reducao, stop_lvl = niveis(preco_now, atr_now, mm_now, plv)
 
     if teto and preco_now > teto:
