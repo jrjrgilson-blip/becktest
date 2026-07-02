@@ -113,42 +113,65 @@ def preparar(df, atr_len, mm_len):
 
 
 def backtest(df, p):
-    entries, realizado, trades, equity, custo = [], 0.0, [], [], 0.0
+    entries, stopspx, realizado, trades, equity, custo = [], [], 0.0, [], [], 0.0
     cc = p["custo"]
+    modo_ind = p.get("modo_saida") == "Stops individuais (% capital)"
+
+    def pct_slot(k):  # k = 1..max_ct ; escalona do 1º (stop_prim) ao último (stop_ult)
+        if p["max_ct"] <= 1:
+            return p["stop_prim"]
+        frac = (k - 1) / (p["max_ct"] - 1)
+        return p["stop_prim"] + frac * (p["stop_ult"] - p["stop_prim"])
+
+    def abre(price, dt, tipo):
+        entries.append(price)
+        k = len(entries)
+        stopspx.append(price - pct_slot(k) * p["capital"] / p["ponto"])
+
     for dt, row in df.iterrows():
         price, a, mm, mmup = row["Close"], row["ATR"], row["MM"], row["MM_up"]
         if np.isnan(a):
             equity.append(realizado); continue
         bull = (not np.isnan(mm)) and price > mm and bool(mmup)
 
-        # --- acao ao virar baixa (regime) ---
-        if p["usar_regime"] and not bull and entries:
-            if p["acao"] == "Zerar tudo":
-                for e in entries:
+        if modo_ind:
+            # --- stops individuais por contrato (% do capital) ---
+            i = 0
+            while i < len(entries):
+                if price <= stopspx[i]:
+                    e = entries.pop(i); stopspx.pop(i)
                     realizado += (price - e) * p["ponto"] - cc; custo += cc
-                    trades.append((dt, "SAIDA_REGIME", price, price - e))
-                entries = []
-            elif p["acao"] == "Reduzir p/ 1" and len(entries) > 1:
-                e = entries.pop()
-                realizado += (price - e) * p["ponto"] - cc; custo += cc
-                trades.append((dt, "REDUZ_REGIME", price, price - e))
-
-        # --- stop catastrofico de carteira ---
-        if entries:
-            avg = np.mean(entries)
-            if (price - avg) * len(entries) * p["ponto"] < -p["stop_pct"] * p["capital"]:
-                for e in entries:
+                    trades.append((dt, "STOP_IND", price, price - e))
+                else:
+                    i += 1
+        else:
+            # --- acao ao virar baixa (regime) ---
+            if p["usar_regime"] and not bull and entries:
+                if p["acao"] == "Zerar tudo":
+                    for e in entries:
+                        realizado += (price - e) * p["ponto"] - cc; custo += cc
+                        trades.append((dt, "SAIDA_REGIME", price, price - e))
+                    entries, stopspx = [], []
+                elif p["acao"] == "Reduzir posição" and len(entries) > p["reduzir_para"]:
+                    e = entries.pop(); stopspx.pop()
                     realizado += (price - e) * p["ponto"] - cc; custo += cc
-                    trades.append((dt, "STOP", price, price - e))
-                entries = []
+                    trades.append((dt, "REDUZ_REGIME", price, price - e))
+            # --- stop catastrofico de carteira ---
+            if entries:
+                avg = np.mean(entries)
+                if (price - avg) * len(entries) * p["ponto"] < -p["stop_pct"] * p["capital"]:
+                    for e in entries:
+                        realizado += (price - e) * p["ponto"] - cc; custo += cc
+                        trades.append((dt, "STOP", price, price - e))
+                    entries, stopspx = [], []
 
-        # --- realizacao ---
+        # --- realizacao (ambos os modos) ---
         while entries and price >= entries[-1] + p["tp_mult"] * a:
-            e = entries.pop()
+            e = entries.pop(); stopspx.pop()
             realizado += (price - e) * p["ponto"] - cc; custo += cc
             trades.append((dt, "VENDA", price, price - e))
 
-        # --- entradas / adds (so em alta se regime ligado) ---
+        # --- entradas / adds (gate de regime) ---
         pos = len(entries)
         libera = bull or not p["usar_regime"]
         if libera:
@@ -159,10 +182,10 @@ def backtest(df, p):
                     repique_ok = (not np.isnan(mm)) and price <= mm + p["reentrada_band"] * a
                 if not esticado and repique_ok:
                     for _ in range(min(p["ct_inicial"], p["max_ct"])):
-                        entries.append(price); realizado -= cc; custo += cc
+                        abre(price, dt, "COMPRA"); realizado -= cc; custo += cc
                     trades.append((dt, "COMPRA", price, 0.0))
             elif pos < p["max_ct"] and price <= entries[-1] - p["add_mult"] * a:
-                entries.append(price); realizado -= cc; custo += cc
+                abre(price, dt, "ADD"); realizado -= cc; custo += cc
                 trades.append((dt, "ADD", price, 0.0))
 
         aberto = sum((price - e) for e in entries) * p["ponto"]
@@ -220,7 +243,7 @@ with st.sidebar:
     atr_len = st.number_input("ATR (períodos)", 5, 50, 6)
     add_mult = st.slider("Adiciona a cada X × ATR de queda", 0.3, 4.0, 2.4, 0.1)
     tp_mult = st.slider("Realiza a cada X × ATR de alta", 0.3, 4.0, 3.0, 0.1)
-    max_ct = st.slider("Máximo de contratos", 1, 8, 2)
+    max_ct = st.slider("Máximo de contratos", 1, 10, 2)
     ct_inicial = st.number_input("Contratos na 1ª entrada", 1, max_ct, 1)
 
     st.header("Reentrada")
@@ -230,9 +253,16 @@ with st.sidebar:
     st.header("Filtro de regime")
     usar_regime = st.checkbox("Ligar filtro de regime (média + inclinação)", True)
     mm_len = st.number_input("Média de tendência (regime)", 10, 300, 21)
-    acao = st.selectbox("Ao virar baixa", ["Manter", "Reduzir p/ 1", "Zerar tudo"], index=1)
+    acao = st.selectbox("Ao virar baixa", ["Manter", "Reduzir posição", "Zerar tudo"], index=1)
+    reduzir_para = st.number_input("Reduzir para (contratos)", 1, max_ct, 1)
     ext_guard = st.checkbox("Trava de esticada (não iniciar longe da média)", True)
     ext_mult = st.slider("Distância máx. p/ iniciar (× ATR)", 0.5, 6.0, 4.0, 0.5)
+
+    st.header("Saída na baixa")
+    modo_saida = st.selectbox("Como sair na baixa",
+                              ["Regime (média)", "Stops individuais (% capital)"], index=0)
+    stop_prim = st.slider("Stop do 1º contrato (% capital)", 0.01, 0.30, 0.05, 0.01)
+    stop_ult = st.slider("Stop do último contrato (% capital)", 0.01, 0.50, 0.10, 0.01)
 
     st.header("Custos e risco")
     custo = st.number_input("Custo por contrato/operação (R$)", 0.0, 20.0, 1.5, 0.5)
@@ -267,13 +297,15 @@ with tab1:
 
         p = dict(atr_len=atr_len, add_mult=add_mult, tp_mult=tp_mult, max_ct=max_ct,
                  ct_inicial=ct_inicial, modo_reentrada=modo_reentrada, reentrada_band=reentrada_band,
-                 usar_regime=usar_regime, acao=acao, ext_guard=ext_guard, ext_mult=ext_mult,
+                 usar_regime=usar_regime, acao=acao, reduzir_para=reduzir_para,
+                 modo_saida=modo_saida, stop_prim=stop_prim, stop_ult=stop_ult,
+                 ext_guard=ext_guard, ext_mult=ext_mult,
                  ponto=ponto, capital=capital, stop_pct=stop_pct, custo=custo)
         eq, tdf, realizado, entries, dfr, custo_total = backtest(dfi, p)
 
         n_entradas = int(tdf["Tipo"].isin(["COMPRA", "ADD"]).sum())
-        saidas = tdf[tdf["Tipo"].isin(["VENDA", "STOP", "SAIDA_REGIME", "REDUZ_REGIME"])]
-        n_stops = int((tdf["Tipo"] == "STOP").sum())
+        saidas = tdf[tdf["Tipo"].isin(["VENDA", "STOP", "STOP_IND", "SAIDA_REGIME", "REDUZ_REGIME"])]
+        n_stops = int(tdf["Tipo"].isin(["STOP", "STOP_IND"]).sum())
         n_regime = int(tdf["Tipo"].isin(["SAIDA_REGIME", "REDUZ_REGIME"]).sum())
         win = (saidas["Pontos"] > 0).mean() * 100 if len(saidas) else 0.0
         mdd = (eq - eq.cummax()).min()
