@@ -4,7 +4,9 @@ Fontes: Stooq (auto) -> Yahoo (auto) -> Upload CSV -> Demonstracao (sintetico).
 Extras: filtro de regime, acao ao virar baixa, trava de esticada, custos, seletor de datas.
 """
 import io
-from datetime import date, timedelta
+import json
+import os
+from datetime import date, datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -231,7 +233,7 @@ with st.sidebar:
 
     rodar = st.button("▶ Rodar backtest", type="primary", use_container_width=True)
 
-tab1, tab2 = st.tabs(["📊 Backtest", "🎯 Níveis operacionais"])
+tab1, tab2, tab3 = st.tabs(["📊 Backtest", "🎯 Níveis operacionais", "📌 Acompanhamento"])
 
 with tab1:
     if rodar:
@@ -342,3 +344,129 @@ with tab2:
 
     st.caption(f"Risco máx. teórico do plano ≈ do preço médio até o stop, com {max_ct} contratos. "
                "Distâncias em R$ na tabela usam R$ {:.2f}/ponto.".format(ponto))
+
+    # guarda o plano atual (não fixado) para a aba Acompanhamento
+    st.session_state["plano_atual"] = {
+        "fixado_em": None,
+        "preco_ref": float(preco_now),
+        "atr": float(atr_now),
+        "mm_snapshot": float(mm_now),
+        "entry1": int(grade.iloc[0]["Comprar a"]),
+        "alvo1": int(grade.iloc[0]["Alvo de venda"]),
+        "entry2": int(grade.iloc[1]["Comprar a"]) if len(grade) > 1 else None,
+        "alvo2": int(grade.iloc[1]["Alvo de venda"]) if len(grade) > 1 else None,
+        "pm2": int(grade.iloc[-1]["Preço médio"]),
+        "stop": int(stop_lvl),
+        "teto": int(teto) if teto else None,
+        "max_ct": int(max_ct),
+        "ponto": float(ponto),
+    }
+
+
+PLANO_PATH = "plano_fixo.json"
+
+
+def salvar_plano(pl):
+    try:
+        with open(PLANO_PATH, "w") as f:
+            json.dump(pl, f)
+    except Exception:
+        pass
+
+
+def carregar_plano():
+    try:
+        with open(PLANO_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+with tab3:
+    st.subheader("Acompanhamento — plano fixado")
+    st.caption("Fixe o plano uma vez; os níveis abaixo ficam congelados até você resetar. "
+               "Só o preço e a média do dia mudam, e as cores dizem o que é permitido.")
+
+    if "plano" not in st.session_state:
+        st.session_state["plano"] = carregar_plano()
+
+    ca, cb, cc = st.columns(3)
+    if ca.button("📌 Fixar plano atual", use_container_width=True):
+        pa = st.session_state.get("plano_atual")
+        if pa:
+            pa = dict(pa)
+            pa["fixado_em"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+            st.session_state["plano"] = pa
+            salvar_plano(pa)
+            st.success("Plano fixado.")
+        else:
+            st.warning("Abra a aba **Níveis** primeiro para gerar um plano.")
+    if cc.button("🗑 Resetar", use_container_width=True):
+        st.session_state["plano"] = None
+        try:
+            os.remove(PLANO_PATH)
+        except Exception:
+            pass
+        st.info("Acompanhamento zerado.")
+    up = cb.file_uploader("Carregar .json", type=["json"], label_visibility="collapsed")
+    if up is not None:
+        try:
+            st.session_state["plano"] = json.load(up)
+            st.success("Plano carregado do arquivo.")
+        except Exception as e:
+            st.warning(f"Arquivo inválido ({e}).")
+
+    plano = st.session_state.get("plano")
+    if not plano:
+        st.info("Nenhum plano fixado ainda. Vá em **🎯 Níveis**, ajuste, volte aqui e clique "
+                "em **Fixar plano atual**.")
+    else:
+        st.markdown(f"**Fixado em {plano.get('fixado_em', '—')}** · preço ref "
+                    f"{plano['preco_ref']:,.0f} · ATR {plano['atr']:,.0f}")
+        linhas = [{"Nível": "1ª entrada", "Preço": plano["entry1"], "Alvo de venda": plano["alvo1"]}]
+        if plano.get("entry2"):
+            linhas.append({"Nível": "2ª entrada", "Preço": plano["entry2"],
+                           "Alvo de venda": plano["alvo2"]})
+        st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
+        s1, s2 = st.columns(2)
+        s1.metric("Stop de carteira (fixo)", f"{plano['stop']:,.0f} pts")
+        s2.metric("Teto de esticada (fixo)", f"{plano['teto']:,.0f} pts" if plano.get("teto") else "—")
+        st.download_button("⬇️ Baixar plano (.json) para não perder", json.dumps(plano),
+                           file_name="plano_fixo.json", mime="application/json")
+
+        st.divider()
+        st.markdown("**Atualização do dia** — mexa aqui; os níveis acima continuam fixos:")
+        u1, u2, u3 = st.columns(3)
+        preco_hoje = u1.number_input("Preço hoje", 1000.0, 500000.0,
+                                     float(plano["preco_ref"]), 100.0, key="acomp_preco")
+        mm_hoje = u2.number_input("Média (MM21) hoje", 0.0, 500000.0,
+                                  float(plano["mm_snapshot"]), 100.0, key="acomp_mm")
+        mm_sobe = u3.checkbox("Média subindo", True, key="acomp_slope")
+
+        bull = preco_hoje > mm_hoje and mm_sobe
+
+        # --- validação da 2ª entrada ---
+        if plano.get("entry2"):
+            e2 = plano["entry2"]
+            st.markdown("**2ª entrada (preço médio):**")
+            if not mm_sobe:
+                st.error("🔴 BLOQUEADA — média virando pra baixo. Não fazer preço médio contra a tendência.")
+            elif e2 > mm_hoje:
+                st.success(f"🟢 VALIDADA — se cair até {e2:,.0f}, ainda está acima da média "
+                           f"({mm_hoje:,.0f}). Pode adicionar o 2º contrato.")
+            else:
+                st.error(f"🔴 BLOQUEADA — em {e2:,.0f} o preço já estaria abaixo da média "
+                         f"({mm_hoje:,.0f}) = regime de baixa. Não adicionar.")
+
+        # --- validação de reentrada (após stop / posição zerada) ---
+        st.markdown("**Reentrada (se você zerou por stop ou alvo e está de fora):**")
+        teto = plano.get("teto")
+        if teto and preco_hoje > teto:
+            st.warning(f"🟡 ESTICADO — preço acima do teto ({teto:,.0f}). Espere recuar para iniciar.")
+        elif not bull:
+            motivo = "abaixo da média" if preco_hoje <= mm_hoje else "com média caindo"
+            st.error(f"🔴 NÃO reentrar — preço {preco_hoje:,.0f} {motivo} ({mm_hoje:,.0f}). "
+                     "Ainda é baixa; espere o preço reconquistar a média com ela subindo.")
+        else:
+            st.success("🟢 Reentrada VALIDADA — preço acima da média, média subindo e sem esticar. "
+                       "Pode montar um plano novo: vá em Níveis, puxe o candle e fixe de novo.")
