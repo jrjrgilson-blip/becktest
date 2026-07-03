@@ -376,16 +376,37 @@ with tab2:
     st.markdown("**Grade de entradas e alvos** (compra na queda, vende na alta):")
     st.dataframe(grade, use_container_width=True, hide_index=True)
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Linha de redução (regime)", f"{reducao:,.0f} pts",
-              help="Se o preço perder essa linha com a média virando pra baixo: reduzir p/ 1 contrato.")
-    m2.metric(f"Stop de carteira ({max_ct} ctr)", f"{stop_lvl:,.0f} pts",
-              help=f"Onde a perda aberta atinge {stop_pct:.0%} do capital com a posição cheia.")
-    m3.metric("Teto de esticada", f"{teto:,.0f} pts" if teto else "—",
-              help="Acima disso, não iniciar posição nova.")
+    # stops individuais por contrato (usados no modo "Stops individuais")
+    stops_ind_disp, _kk = [], 0
+    for _, r in grade.iterrows():
+        for _ in range(int(r["Ctr"])):
+            _kk += 1
+            _pct = stop_prim if max_ct <= 1 else stop_prim + (_kk - 1) / (max_ct - 1) * (stop_ult - stop_prim)
+            stops_ind_disp.append({"Contrato": _kk, "Entra a": int(r["Comprar a"]),
+                                   "Stop": int(round(r["Comprar a"] - _pct * capital / ponto)),
+                                   "Perda R$": int(round(_pct * capital))})
 
-    st.caption(f"Risco máx. teórico do plano ≈ do preço médio até o stop, com {max_ct} contratos. "
-               "Distâncias em R$ na tabela usam R$ {:.2f}/ponto.".format(ponto))
+    if modo_saida == "Stops individuais (% capital)":
+        st.markdown("**Níveis de saída — stop individual por contrato (% do capital):**")
+        st.dataframe(pd.DataFrame(stops_ind_disp), use_container_width=True, hide_index=True)
+        risco_tot = sum(s["Perda R$"] for s in stops_ind_disp)
+        c1, c2 = st.columns(2)
+        c1.metric("Teto de esticada", f"{teto:,.0f} pts" if teto else "—")
+        c2.metric("Risco total se stopar tudo", f"R$ {risco_tot:,.0f}")
+        st.caption("Neste modo a média 21 só valida a entrada; a saída na baixa é pelos stops "
+                   "individuais acima. O stop de carteira e a redução por regime ficam desativados.")
+    else:
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Linha de redução (regime)", f"{reducao:,.0f} pts",
+                  help=f"Se o preço perder essa linha (a média) com ela virando pra baixo: "
+                       f"reduzir para {reduzir_para} contrato(s).")
+        m2.metric(f"Stop de carteira ({max_ct} ctr)", f"{stop_lvl:,.0f} pts",
+                  help=f"Onde a perda aberta atinge {stop_pct:.0%} do capital com a posição cheia.")
+        m3.metric("Teto de esticada", f"{teto:,.0f} pts" if teto else "—",
+                  help="Acima disso, não iniciar posição nova.")
+        st.caption(f"Redução na baixa é pela média (dinâmica), não por um preço fixo. Para níveis "
+                   f"de redução fixos, use o modo **Stops individuais** na barra lateral. "
+                   f"R$ {ponto:.2f}/ponto.")
 
     # guarda o plano atual (não fixado) para a aba Acompanhamento
     grade_rec = [{"Nível": r["Nível"], "Comprar a": int(r["Comprar a"]), "Ctr": int(r["Ctr"]),
