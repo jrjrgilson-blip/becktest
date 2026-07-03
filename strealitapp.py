@@ -388,20 +388,27 @@ with tab2:
                "Distâncias em R$ na tabela usam R$ {:.2f}/ponto.".format(ponto))
 
     # guarda o plano atual (não fixado) para a aba Acompanhamento
+    grade_rec = [{"Nível": r["Nível"], "Comprar a": int(r["Comprar a"]), "Ctr": int(r["Ctr"]),
+                  "Posição": int(r["Posição"]), "Alvo de venda": int(r["Alvo de venda"]),
+                  "Preço médio": int(r["Preço médio"])} for _, r in grade.iterrows()]
+    stops_ind = []
+    _kk = 0
+    for _, r in grade.iterrows():
+        for _ in range(int(r["Ctr"])):
+            _kk += 1
+            _pct = stop_prim if max_ct <= 1 else stop_prim + (_kk - 1) / (max_ct - 1) * (stop_ult - stop_prim)
+            _sp = int(round(r["Comprar a"] - _pct * capital / ponto))
+            stops_ind.append({"Contrato": _kk, "Entra a": int(r["Comprar a"]),
+                              "Stop": _sp, "Perda R$": int(round(_pct * capital))})
     st.session_state["plano_atual"] = {
-        "fixado_em": None,
-        "preco_ref": float(preco_now),
-        "atr": float(atr_now),
-        "mm_snapshot": float(mm_now),
+        "fixado_em": None, "preco_ref": float(preco_now), "atr": float(atr_now),
+        "mm_snapshot": float(mm_now), "grade": grade_rec,
         "entry1": int(grade.iloc[0]["Comprar a"]),
-        "alvo1": int(grade.iloc[0]["Alvo de venda"]),
-        "entry2": int(grade.iloc[1]["Comprar a"]) if len(grade) > 1 else None,
-        "alvo2": int(grade.iloc[1]["Alvo de venda"]) if len(grade) > 1 else None,
-        "pm2": int(grade.iloc[-1]["Preço médio"]),
-        "stop": int(stop_lvl),
-        "teto": int(teto) if teto else None,
-        "max_ct": int(max_ct),
-        "ponto": float(ponto),
+        "prox_add": int(grade.iloc[1]["Comprar a"]) if len(grade) > 1 else None,
+        "modo_saida": modo_saida, "stop_carteira": int(stop_lvl),
+        "reduzir_para": int(reduzir_para), "acao": acao, "stops_ind": stops_ind,
+        "teto": int(teto) if teto else None, "max_ct": int(max_ct),
+        "ct_inicial": int(ct_inicial), "ponto": float(ponto),
     }
 
 
@@ -464,15 +471,25 @@ with tab3:
                 "em **Fixar plano atual**.")
     else:
         st.markdown(f"**Fixado em {plano.get('fixado_em', '—')}** · preço ref "
-                    f"{plano['preco_ref']:,.0f} · ATR {plano['atr']:,.0f}")
-        linhas = [{"Nível": "1ª entrada", "Preço": plano["entry1"], "Alvo de venda": plano["alvo1"]}]
-        if plano.get("entry2"):
-            linhas.append({"Nível": "2ª entrada", "Preço": plano["entry2"],
-                           "Alvo de venda": plano["alvo2"]})
-        st.dataframe(pd.DataFrame(linhas), hide_index=True, use_container_width=True)
-        s1, s2 = st.columns(2)
-        s1.metric("Stop de carteira (fixo)", f"{plano['stop']:,.0f} pts")
-        s2.metric("Teto de esticada (fixo)", f"{plano['teto']:,.0f} pts" if plano.get("teto") else "—")
+                    f"{plano['preco_ref']:,.0f} · ATR {plano['atr']:,.0f} · início "
+                    f"{plano.get('ct_inicial', 1)} ctr")
+
+        if plano.get("grade"):
+            st.markdown("**Grade fixa (entradas e alvos):**")
+            st.dataframe(pd.DataFrame(plano["grade"]), hide_index=True, use_container_width=True)
+
+        modo = plano.get("modo_saida", "Regime (média)")
+        if modo == "Stops individuais (% capital)" and plano.get("stops_ind"):
+            st.markdown("**Stops individuais (fixos, por contrato):**")
+            st.dataframe(pd.DataFrame(plano["stops_ind"]), hide_index=True, use_container_width=True)
+        else:
+            s1, s2 = st.columns(2)
+            s1.metric("Stop de carteira (fixo)", f"{plano.get('stop_carteira', 0):,.0f} pts")
+            acao_txt = (f"Reduzir p/ {plano.get('reduzir_para', 1)}"
+                        if plano.get("acao") == "Reduzir posição" else plano.get("acao", "—"))
+            s2.metric("Ao virar baixa", acao_txt)
+        st.metric("Teto de esticada (fixo)",
+                  f"{plano['teto']:,.0f} pts" if plano.get("teto") else "—")
         st.download_button("⬇️ Baixar plano (.json) para não perder", json.dumps(plano),
                            file_name="plano_fixo.json", mime="application/json")
 
@@ -484,31 +501,32 @@ with tab3:
         mm_hoje = u2.number_input("Média (MM21) hoje", 0.0, 500000.0,
                                   float(plano["mm_snapshot"]), 100.0, key="acomp_mm")
         mm_sobe = u3.checkbox("Média subindo", True, key="acomp_slope")
-
         bull = preco_hoje > mm_hoje and mm_sobe
 
-        # --- validação da 2ª entrada ---
-        if plano.get("entry2"):
-            e2 = plano["entry2"]
-            st.markdown("**2ª entrada (preço médio):**")
+        prox = plano.get("prox_add")
+        if prox:
+            st.markdown("**Próxima adição:**")
             if not mm_sobe:
-                st.error("🔴 BLOQUEADA — média virando pra baixo. Não fazer preço médio contra a tendência.")
-            elif e2 > mm_hoje:
-                st.success(f"🟢 VALIDADA — se cair até {e2:,.0f}, ainda está acima da média "
-                           f"({mm_hoje:,.0f}). Pode adicionar o 2º contrato.")
+                st.error("🔴 BLOQUEADA — média virando pra baixo. Não adicionar contra a tendência.")
+            elif prox > mm_hoje:
+                st.success(f"🟢 VALIDADA — se cair até {prox:,.0f}, ainda está acima da média "
+                           f"({mm_hoje:,.0f}). Pode adicionar.")
             else:
-                st.error(f"🔴 BLOQUEADA — em {e2:,.0f} o preço já estaria abaixo da média "
-                         f"({mm_hoje:,.0f}) = regime de baixa. Não adicionar.")
+                st.error(f"🔴 BLOQUEADA — em {prox:,.0f} o preço já estaria abaixo da média "
+                         f"({mm_hoje:,.0f}) = regime de baixa.")
 
-        # --- validação de reentrada (após stop / posição zerada) ---
-        st.markdown("**Reentrada (se você zerou por stop ou alvo e está de fora):**")
+        if modo != "Stops individuais (% capital)" and plano.get("acao") == "Reduzir posição" and not bull:
+            st.warning(f"🟡 Regime virou baixa (preço {preco_hoje:,.0f} vs média {mm_hoje:,.0f}) → "
+                       f"reduzir para {plano.get('reduzir_para', 1)} contrato(s).")
+
+        st.markdown("**Reentrada (se você zerou e está de fora):**")
         teto = plano.get("teto")
         if teto and preco_hoje > teto:
             st.warning(f"🟡 ESTICADO — preço acima do teto ({teto:,.0f}). Espere recuar para iniciar.")
         elif not bull:
             motivo = "abaixo da média" if preco_hoje <= mm_hoje else "com média caindo"
             st.error(f"🔴 NÃO reentrar — preço {preco_hoje:,.0f} {motivo} ({mm_hoje:,.0f}). "
-                     "Ainda é baixa; espere o preço reconquistar a média com ela subindo.")
+                     "Ainda é baixa; espere reconquistar a média com ela subindo.")
         else:
-            st.success("🟢 Reentrada VALIDADA — preço acima da média, média subindo e sem esticar. "
+            st.success("🟢 Reentrada VALIDADA — preço acima da média, subindo e sem esticar. "
                        "Pode montar um plano novo: vá em Níveis, puxe o candle e fixe de novo.")
